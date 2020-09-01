@@ -1,0 +1,501 @@
+<!DOCTYPE html><script type="module">
+import App, { Vec3 } from "./fungi/App.js";
+import Vec2		from "./fungi/maths/Vec2.js";
+import Points	from "./fungi/geo/Points.js";
+import Lines	from "./fungi/geo/Lines.js";
+
+//#####################################################
+App
+	.init()
+	.load_shaders( "UvBorder.js" )
+	.use_debug()
+	.set_camera( 0, 40, 6, 0, 1.0, 0 )
+	.task( init )
+	.then();
+
+//#####################################################
+
+async function init(){
+	$App.init();
+
+	//let f = new Frustum3D().from_camera( App.cam_com, 0.3, 3.0 ) ;
+	//f.node.rot_by( -45, "x" );
+
+	let mesh	= floor_quad_mesh();
+	let mat		= App.shader.new_material( "UvBorder", null, { cullFace:false } );
+	//let e		= App.mesh_entity( "x", mesh, mat, App.mesh.TRI );
+	
+	// ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+	// Setup Quad Tree
+	let qt = new QTree( false, 4, 4 );
+	qt.root.data = true;
+	qt.root.expand().set_all_data( true );
+
+	// Open up a few levels and set to render. 
+	// Any parent Quadrant will not render if there is at least one Child set to true.
+	qt.root.quadrants[ QTreeNode.TOP_L ].expand().set_all_data( true );
+	qt.root.quadrants[ QTreeNode.BOT_R ].expand().set_all_data( true );
+
+	qt.root.quadrants[ QTreeNode.BOT_R ].quadrants[ QTreeNode.BOT_R ].expand().set_all_data( true );
+
+	// ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+	// Render Quad Tree
+	let offset = new Vec3( -2, 0, -2 );
+	qt.draw((n)=>{
+		let name	= n.get_address_str();
+		let e		= App.mesh_entity( name, mesh, mat, App.mesh.TRI );
+
+		e.node.set_scl( n.width, 1.0, n.height );
+		e.node.add_pos( offset ).add_pos( n.min.x, 0, n.min.y );
+
+		console.log( name );
+	});
+
+	return true;
+}
+
+
+window.addEventListener( "keydown", (e)=>{
+	switch( e.keyCode ){
+		case 38: $App.pan( 0.1, Vec3.UP );		break;	// UP
+		case 40: $App.pan( -0.1, Vec3.UP );		break;	// Down
+		case 37: $App.pan( 0.1, Vec3.LEFT );	break;	// Left
+		case 39: $App.pan( -0.1, Vec3.LEFT );	break;	// Right
+		case 87: $App.rot( -1 ); 				break;	// w
+		case 83: $App.rot( 1 );					break;	// S
+		case 65: $App.far( -0.1 ); 				break;	// A
+		case 68: $App.far( 0.1 );				break;	// D
+
+		/*
+		case 81: $App.frustum.add_radius( 10 ); $App.draw(); break;		// Q
+		case 69: $App.frustum.add_radius( -10 ); $App.draw(); break;	// E
+		case 80: // P
+			console.log( "---- INFO ----" );
+			console.log( "POSITION: ", $App.camera.pos );
+			console.log( "ANGLE: ", $App.camera.angle );
+		break;
+		*/
+	}
+});
+
+class $App{
+	static frustum = null;
+	static init(){
+		this.frustum = new Frustum3D().from_camera( App.cam_com, 0.3, 3.0 );
+		this.frustum.set_pos( [0,3,0] ).rot_by( 90, "x" );
+	}
+
+	static pan( n, dir ){ this.frustum.node.add_pos( Vec3.scale( dir, n ).transform_quat( this.frustum.node.local.rot ) ); return this; }
+	static rot( n ){ this.frustum.rot_by( n, "x" ); return this; }
+	static far( v ){
+		let f = this.frustum.far + v;
+		let n = this.frustum.near;
+
+		if( f < n * 2 ) f = n * 2;
+		
+		this.frustum.from_camera( App.cam_com, n, f );
+		return this;
+	}q
+}
+
+
+// http://www.lighthouse3d.com/tutorials/view-frustum-culling/geometric-approach-implementation/
+class Frustum3D{
+	near 		= 0;
+	far			= 0;
+
+	l_near_c	= new Vec3();	// Points of the Near Plane
+	l_near_tl	= new Vec3();
+	l_near_bl	= new Vec3();
+	l_near_br	= new Vec3();
+	l_near_tr	= new Vec3();
+
+	l_far_c		= new Vec3();	// Points of the Far Plane
+	l_far_tl	= new Vec3();
+	l_far_bl	= new Vec3();
+	l_far_br	= new Vec3();
+	l_far_tr	= new Vec3();
+
+	// All 6 Planes of the Frustum
+	plane_n = [ this.l_near_tl, this.l_near_bl, this.l_near_br, this.l_near_tr ];
+	plane_f = [ this.l_far_tr, this.l_far_br, this.l_far_bl, this.l_far_tl ];
+	plane_t = [ this.l_far_tl, this.l_near_tl, this.l_near_tr, this.l_far_tr ];
+	plane_r = [ this.l_far_tr, this.l_near_tr, this.l_near_br, this.l_far_br ];
+	plane_b = [ this.l_far_br, this.l_near_br, this.l_near_bl, this.l_far_bl ];
+	plane_l = [ this.l_far_bl, this.l_near_bl, this.l_near_tl, this.l_far_tl ];
+
+	// Plane Data
+	planes		= [
+		{ norm: new Vec3(), pnt: new Vec3() },
+		{ norm: new Vec3(), pnt: new Vec3() },
+		{ norm: new Vec3(), pnt: new Vec3() },
+		{ norm: new Vec3(), pnt: new Vec3() },
+		{ norm: new Vec3(), pnt: new Vec3() },
+		{ norm: new Vec3(), pnt: new Vec3() },
+	];
+
+	constructor(){
+		this.entity	= App.mesh_entity( "Frustum" );
+		this.node	= this.entity.node;
+
+		// Add Point Rendering to Entity
+		this.pnt = new Points();
+		this.pnt.default_size	= 0.1;
+		this.pnt.default_shape	= 1;
+		this.pnt.default_color	= "green";
+
+		App.ecs.add_com( this.entity.id, this.pnt );
+		this.entity.draw.items.push( this.pnt.get_draw_item() );
+
+		// Add Line Rendering to Entity
+		this.ln	= new Lines();	
+		this.ln.default_color = "green";								// Line Mesh Component
+		App.ecs.add_com( this.entity.id, this.ln );				// Add Component to Entity
+		this.entity.draw.items.push( this.ln.get_draw_item() );	// Add Mesh to Draw List of Entity
+	}
+
+	set_pos( ){ this.node.set_pos.apply( this.node, arguments ); return this; }
+	rot_by(){ this.node.rot_by.apply( this.node, arguments ); return this; }
+
+	from_camera( cam, near=null, far=null ){
+		// http://www.lighthouse3d.com/tutorials/view-frustum-culling/view-frustums-shape/
+		// http://www.lighthouse3d.com/tutorials/view-frustum-culling/geometric-approach-extracting-the-planes/
+
+		near	= near || cam.near;
+		far		= far || cam.far;
+
+		this.near	= near;
+		this.far	= far;
+
+		//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+		let v = new Vec3().from_scale( Vec3.FORWARD, far );
+		this.ln.add( Vec3.ZERO, v );
+
+		// Compute the Width/Height of the Near and Far Planes
+		let near_h	= 2 * Math.tan( cam.fov / 2 ) * near;
+		let near_w	= near_h * cam.ratio;
+		let far_h	= 2 * Math.tan( cam.fov / 2 ) * far;
+		let far_w	= far_h * cam.ratio;
+
+		// Half Movement from Center of Far/Near Plane
+		let up_inc	= new Vec3();
+		let lft_inc	= new Vec3();
+		
+		//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+		// Near Plane
+		up_inc.from_scale( Vec3.UP, near_h / 2 );
+		lft_inc.from_scale( Vec3.LEFT, near_w / 2 );
+
+		this.l_near_c.from_scale( Vec3.FORWARD, near );
+		this.l_near_tl.from_add( this.l_near_c, up_inc ).add( lft_inc );	// tl = ncenter + (up * Hnear/2) - (right * Wnear/2)
+		this.l_near_bl.from_sub( this.l_near_c, up_inc ).add( lft_inc );	// bl = ncenter - (up * Hnear/2) - (right * Wnear/2)
+		this.l_near_br.from_sub( this.l_near_c, up_inc ).sub( lft_inc );	// br = ncenter - (up * Hnear/2) + (right * Wnear/2)
+		this.l_near_tr.from_add( this.l_near_c, up_inc ).sub( lft_inc );	// tr = ncenter + (up * Hnear/2) + (right * Wnear/2)
+
+		/*
+		this.pnt.add( this.l_near_c );
+		this.pnt.add( this.l_near_tl );
+		this.pnt.add( this.l_near_bl );
+		this.pnt.add( this.l_near_br );
+		this.pnt.add( this.l_near_tr );
+		*/
+
+		//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+		//Far Plane
+		up_inc.from_scale( Vec3.UP, far_h / 2 );
+		lft_inc.from_scale( Vec3.LEFT, far_w / 2 );
+
+		this.l_far_c.from_scale( Vec3.FORWARD, far );
+		this.l_far_tl.from_add( this.l_far_c, up_inc ).add( lft_inc );	// ftl = fc + (up * Hfar/2) - (right * Wfar/2)
+		this.l_far_bl.from_sub( this.l_far_c, up_inc ).add( lft_inc );	// fbl = fc - (up * Hfar/2) - (right * Wfar/2)
+		this.l_far_br.from_sub( this.l_far_c, up_inc ).sub( lft_inc );	// fbr = fc - (up * Hfar/2) + (right * Wfar/2)
+		this.l_far_tr.from_add( this.l_far_c, up_inc ).sub( lft_inc );	// ftr = fc + (up * Hfar/2) + (right * Wfar/2)
+
+		/*
+		this.pnt.add( this.l_far_c );
+		this.pnt.add( this.l_far_tl );
+		this.pnt.add( this.l_far_bl );
+		this.pnt.add( this.l_far_br );
+		this.pnt.add( this.l_far_tr );
+		*/
+
+		//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+		// Compute Plane Mid Points and Normal Direction.
+		let ary = [ this.plane_n, this.plane_f, this.plane_t, this.plane_r, this.plane_b, this.plane_l ];
+		let i, j, p, plane,
+			a 	= new Vec3(),
+			b 	= new Vec3(),
+			n 	= new Vec3(),
+			mid = new Vec3();
+
+		for( i=0; i < ary.length; i++ ){
+			plane = ary[ i ];
+			mid.clear();
+
+			// Get the Centroid of the plane
+			for( p of plane ) mid.add( p );
+			mid.scale( 0.25 ) // Average by 4
+
+			// Get INWARD Normal of the plane
+			a.from_sub( plane[ 1 ], plane[ 0 ] );
+			b.from_sub( plane[ 3 ], plane[ 0 ] );
+			n.from_cross( b, a ).norm();
+
+			// Save Results
+			this.planes[ i ].pnt.copy( mid );
+			this.planes[ i ].norm.copy( n );
+		}
+
+		//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+		this.update_mesh();
+		return this;
+	}
+
+	update_mesh(){
+		this.ln.reset();
+		this.pnt.reset();
+
+		let i, ii;
+		for( i=0; i < 4; i++ ){
+			ii = (i+1) % 4;
+			this.ln.add( this.plane_n[ i ], this.plane_n[ ii ] );	// NEAR
+			this.ln.add( this.plane_f[ i ], this.plane_f[ ii ] );	// FAR
+			this.ln.add( Vec3.ZERO, this.plane_f[ i ] );			// ORIGIN -> FAR
+
+			//this.pnt.add( this.plane_n[ i ], "yellow", 0.08, 6 );	// Near Points
+			//this.pnt.add( this.plane_f[ i ], "yellow", 0.08, 6 );	// Near Points
+		}
+
+		/*
+		let v = new Vec3();
+		for( let p of this.planes ){ // SHOW PLANE CENTER AND NORMAL DIRECTION
+			this.pnt.add( p.pnt, "yellow", 0.08, 6 );
+			this.ln.add( p.pnt, v.from_scale( p.norm, 0.15 ).add( p.pnt ) );
+		}
+		*/
+		
+		this.pnt.add( Vec3.ZERO, "yellow", 0.2, 6 ); // CENTER POINT
+	}
+}
+
+
+function floor_quad_mesh(){
+	let buf_idx		= App.buffer.new_element( new Uint16Array( [ 0,1,2, 2,3,0 ] ) );
+	let buf_vert	= App.buffer.new_array( new Float32Array(
+		/*[ -0.5, 0.0, -0.5, 	0,0,0,	0,0, // Center Ground
+			-0.5, 0.0, 0.5, 	0,1,0,	0,1,
+			0.5, 0.0, 0.5, 	0,1,0,	1,1, 
+			0.5, 0.0, -0.5, 	0,1,0,	1,0 ]*/
+		[ 0.0, 0.01, 0.0, 	0,1,0,	0,0,	// Ground - Top Left Origin
+		  0.0, 0.01, 1.0, 	0,1,0,	0,1,
+		  1.0, 0.01, 1.0, 	0,1,0,	1,1, 
+		  1.0, 0.01, 0.0, 	0,1,0,	1,0 ]
+	));
+
+	return App.mesh.from_buffer_config([
+		{ name: "indices", buffer: buf_idx },
+		{ name: "quad", buffer: buf_vert, interleaved: [
+			{ attrib_loc:0, size:3, stride_len:8 * 4, offset:0 * 4 },
+			{ attrib_loc:1, size:3, stride_len:8 * 4, offset:3 * 4 },
+			{ attrib_loc:2, size:2, stride_len:8 * 4, offset:6 * 4 },
+		]}
+	], "FungiFloorQuadTL", 6 );
+}
+
+
+class QTreeNode{
+	static TOP_L = 0;
+	static TOP_R = 1;
+	static BOT_L = 2;
+	static BOT_R = 3;
+
+	data		= null;
+	address		= 0;
+	depth		= 0;
+	width		= 0;
+	height		= 0;
+	min			= new Vec2();
+	max			= new Vec2();
+	mid			= new Vec2();
+	corners		= [ new Vec2(), new Vec2(), new Vec2(), new Vec2() ];
+	quadrants	= null;
+
+	constructor( node=null, q=0 ){
+		if( node ) this.as_quad( node, q );
+	}
+
+	as_root( x, y, w, h ){
+		this.width		= w;
+		this.height		= h;
+		this.depth		= 0;
+		this.address	= 0;
+
+		this.min.set( x, y );
+		this.max.from_add( this.min, [w,h] );
+		this.mid.from_lerp( this.min, this.max, 0.5 );
+		return this;
+	}
+
+	as_quad( node, q=0 ){
+		let min_x	= node.min.x;
+		let min_y	= node.min.y;
+		let max_x	= node.max.x;
+		let max_y	= node.max.y;
+		let mid_x	= node.mid.x;
+		let mid_y	= node.mid.y;
+
+		switch( q ){
+			case 0: // TOP Left
+				this.min.set( min_x, min_y );
+				this.max.set( mid_x, mid_y );
+			break;	
+			case 1:	// TOP Right
+				this.min.set( mid_x, min_y );
+				this.max.set( max_x, mid_y );
+			break;
+			case 2:	// Bot Left
+				this.min.set( min_x, mid_y );
+				this.max.set( mid_x, max_y );
+			break;
+			case 3:	// Bot Right
+				this.min.set( mid_x, mid_y );
+				this.max.set( max_x, max_y );
+			break;	
+		}
+
+		this.mid.from_lerp( this.min, this.max, 0.5 );
+
+		this.depth		= node.depth + 1;
+		this.width		= this.max.x - this.min.x;
+		this.height		= this.max.y - this.min.y;
+		this.address	= node.address | ( q << ( node.depth * 2 ) );
+
+		this.corners[ 0 ].set( this.min.x, this.min.y );
+		this.corners[ 1 ].set( this.min.x, this.max.y );
+		this.corners[ 2 ].set( this.max.x, this.max.y );
+		this.corners[ 3 ].set( this.max.x, this.min.y );
+
+		//console.log( q, node.depth, this.depth, "PARENT", node.address, node.get_address_str(), "Child", this.address, this.get_address_str() );
+
+		return this;
+	}
+
+	get_address_str(){
+		if( this.depth == 0 ) return "ROOT";
+		
+		let i, num, add = "";
+		for( i=0; i < this.depth; i++ ){
+			num = ( this.address >> ( i*2 ) ) & 3;
+			switch( num ){
+				case 0: add += "00"; break;
+				case 1: add += "10"; break;
+				case 2: add += "01"; break;
+				case 3: add += "11"; break;
+			}
+		}
+		
+		return add;// + "-" + this.address;
+	}
+
+	expand(){
+		if( !this.quadrants ){
+			this.quadrants = [
+				new QTreeNode( this, 0 ),
+				new QTreeNode( this, 1 ),
+				new QTreeNode( this, 2 ),
+				new QTreeNode( this, 3 ),
+			];
+		}
+		return this;
+	}
+
+	set_all_data( d ){
+		if( this.quadrants ){
+			this.quadrants[ 0 ].data = d;
+			this.quadrants[ 1 ].data = d;
+			this.quadrants[ 2 ].data = d;
+			this.quadrants[ 3 ].data = d;
+		}
+		return this;
+	}
+}
+
+class QTree{
+	width	= 512;
+	height	= 512;
+	root	= null;
+
+	constructor( expanded=false, w=512, h=512 ){
+		this.width	= w;
+		this.height	= h;
+		this.root	= new QTreeNode().as_root( 0, 0, w, h );
+
+		if( expanded ) this.root.expand();
+	}
+
+	clear_data(){
+		let n, stack = [ this.root ];
+
+		while( stack.length > 0 ){
+			n		= stack.pop();
+			n.data	= null;
+
+			if( n.quadrants ){
+				stack.push(
+					n.quadrants[ 0 ],
+					n.quadrants[ 1 ],
+					n.quadrants[ 2 ],
+					n.quadrants[ 3 ],
+				);
+			}
+		}
+	}
+
+	draw( fnMesh ){
+		let stack = [ 
+			this.root
+
+			//this.root.quadrants[ 0 ],
+			//this.root.quadrants[ 1 ],
+			//this.root.quadrants[ 2 ],
+			//this.root.quadrants[ 3 ],
+		];
+		
+		let i, n, q, cnt = 0;
+
+		while( stack.length > 0 ){
+			// ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+			n = stack.pop();
+			if( !n.data ) continue;	// Process will set Data to True if its in a Frustum.
+
+			// ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+			// If Children exist, Check if any is set to true, if so add to stack.
+			if( n.quadrants ){
+				cnt = 0;
+
+				// Any Quadrant that has data = true, add to stack;
+				for( q of n.quadrants ){
+					if( q.data ){
+						stack.push( q );
+						cnt++;
+					}
+				}
+
+				// if any children's data is set to true, dont draw this quad.
+				if( cnt != 0 ) continue;
+			}
+
+			// ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+			// This is the final quad in the branch, draw.
+			//c.rect_pnts( n.min, n.max );
+			fnMesh( n );
+		}
+
+	}
+}
+
+
+//#####################################################
+</script>
+<html><head><style>html,body{ margin:0px; padding:0px; width:100%; height:100%; }</style>
+</head><body><canvas id="pg_canvas"></canvas></body></html>
